@@ -1,0 +1,53 @@
+map:
+  width: 1419
+  height: 849
+  resolution: 1
+  origin: [0, 0]
+
+amers:
+  salon_frigo:
+    pos: [300, 0]
+    image: amer_salon.jpg
+
+  salon_radiateur:
+    pos: [0, 125]
+    image: amer_porte_salon_ch1.jpg
+
+  salon_couloir:
+    pos: [727, 450]
+    image: amer_porte_salon_ch1.jpg
+
+  chambre1_lit:
+    pos: [205, 848]
+    image: amer_chambre1.jpg
+
+  chambre2_fenetre:
+    pos: [1419, 764]
+    image: amer_chambre2.jpg
+
+  couloir_toilette:
+    pos: [680, 608]
+    image: amer_couloir.jpg
+
+trajectories:
+  salon_to_chambre1:
+    - salon_frigo
+    - salon_radiateur
+    - chambre1_lit
+
+  salon_to_chambre2:
+    - salon_frigo
+    - salon_couloir
+    - couloir_toilette
+    - chambre2_fenetre
+
+  chambre1_to_salon:
+    - chambre1_lit
+    - salon_radiateur
+    - salon_frigo
+
+  chambre2_to_salon:
+    - chambre2_fenetre
+    - couloir_toilette
+    - salon_couloir
+    - salon_frigo
