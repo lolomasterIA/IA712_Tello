@@ -3,22 +3,32 @@ import glob
 import time
 import cv2
 from djitellopy import Tello
+import os
 
-tello = Tello()
+os.makedirs("calib", exist_ok=True)
 
-# Connexion au drone
-tello.connect()
-tello.streamon()
-frame_read = tello.get_frame_read()
+take_picts = False
 
-for i in range(20):
-    cv2.imwrite(f"calib/frame_{i:02d}.jpg", frame_read.frame)
-    time.sleep(2)
+if take_picts:
+    tello = Tello()
+
+    # Connexion au drone
+    tello.connect()
+    tello.streamon()
+    frame_read = tello.get_frame_read()
+
+    print("go")
+    time.sleep(10)
+    print("gogo")
+
+    for i in range(20):
+        cv2.imwrite(f"calib/frame_{i:02d}.jpg", frame_read.frame)
+        time.sleep(2)
 
 images = glob.glob("calib/*.jpg")
 
 # dimensions des coins internes
-pattern_size = (8, 6)         # 9x6 cases → 8x5 coins
+pattern_size = (6, 8)         # 9x6 cases → 8x5 coins
 square_size = 25.0
 
 objp = np.zeros((pattern_size[0]*pattern_size[1], 3), np.float32)
@@ -49,3 +59,7 @@ ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(
 print("RMS reprojection error:", ret)
 print("K =", K)
 print("dist =", dist.ravel())
+
+# --- 4.  Sauvegarde ---
+np.savez("tello_intrinsics_7x9.npz", K=K, dist=dist)
+print("Calibration enregistrée dans tello_intrinsics_7x9.npz")

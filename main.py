@@ -24,12 +24,13 @@ QR_POS = {
 }
 
 QR_SIZE_CM = 14                     # côté du QR imprimé
-# calib Tello (approximatif)            fx ≈ fy  ≈ 920 px  |  cx, cy = moitié image
-CAM_MTX = np.array([[920,   0, 320],
-                    [0, 920, 240],
-                    [0,   0,   1]], dtype=np.float32)
-DIST_COEF = np.zeros(5)               # (on néglige la distorsion)
+calib = np.load("tello_intrinsics_7x9.npz")     # ← chemin complet si besoin
+# ≈ [[916,0,516],[0,916,367],[0,0,1]]
+CAM_MTX = calib["K"].astype(np.float32)
+DIST_COEF = calib["dist"].astype(np.float32)    # 5 coeffs
 
+print("K  :", CAM_MTX, sep="\n")
+print("dist:", DIST_COEF.ravel())
 # Repère global des amers
 QR_POS = {                  # x, y en cm
     "asf": (300,   0),
@@ -65,11 +66,11 @@ def reposition_with_qr(tello, verbose=True):
 
     for step in range(12):
         frame = frame_read.frame
-        # frame = cv2.resize(frame, (640, 480))
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame = cv2.equalizeHist(frame)
         data, pts, _ = qr.detectAndDecode(frame)
         print(f"Raw data='{data}'  Pts={type(pts)}")
         ok_save = cv2.imwrite("debug/frame_raw"+str(step)+".jpg", frame)
-        print(ok_save)
 
         if data in QR_POS and pts is not None:
             corners = np.squeeze(pts).astype(np.float32)  # (4,2)
@@ -84,7 +85,7 @@ def reposition_with_qr(tello, verbose=True):
 
             amer_x, amer_y = QR_POS[data]
             drone_x = amer_x + dx
-            drone_y = amer_y + dy
+            drone_y = amer_y - dy
 
             if verbose:
                 print(f"✅ QR {data} — amer @({amer_x},{amer_y}) cm  → "
@@ -124,7 +125,7 @@ def scan_for_human_yolov8(tello, verbose=True):
     for i in range(12):
         angle = i * 30
         frame = frame_read.frame
-        frame = cv2.resize(frame, (640, 480))
+        # frame = cv2.resize(frame, (640, 480))
 
         # Prédiction YOLOv8
         results = model.predict(source=frame, save=False, verbose=False)
@@ -162,27 +163,54 @@ def scan_for_human_yolov8(tello, verbose=True):
     return detected, detected_frame
 
 
+def rotate_to_yaw(tello, target_yaw_deg, tol=2):
+    """Tourne le drone vers target_yaw (0-360°) en choisissant le plus court chemin."""
+    current = tello.get_yaw() % 360           # ex. 323°
+    delta = (target_yaw_deg - current + 540) % 360 - 180   # dans [-180;180]
+
+    if abs(delta) < tol:
+        return                                # déjà aligné
+
+    if delta > 0:
+        tello.rotate_clockwise(int(round(delta)))
+    else:
+        tello.rotate_counter_clockwise(int(round(-delta)))
+
+    time.sleep(2)                             # stabilisation
+
+
+def move_forward_safe(tello, dist_cm):
+    remaining = dist_cm
+    while remaining > 0:
+        step = min(500, remaining)
+        tello.move_forward(int(round(step)))
+        remaining -= step
+        time.sleep(2)
+
+
 def go_to_point(tello, current_pos, target_pos):
-    """Effectue un déplacement relatif en ligne droite sur l'axe X puis Y (naïf, pas d'évitement)"""
+    """
+    Déplace le drone du point courant vers target_pos.
+    - Calcule la direction (en XY monde) et tourne le drone
+      en tenant compte de son yaw réel.
+    - Avance ensuite par tranches de 500 cm.
+    """
     dx = target_pos[0] - current_pos[0]
     dy = target_pos[1] - current_pos[1]
 
-    # Distance totale
-    distance = math.hypot(dx, dy)
-    angle = math.degrees(math.atan2(dy, dx))
+    distance = math.hypot(dx, dy)                # cm
+    target_yaw = (math.degrees(math.atan2(dy, dx))) % 360
 
-    # Tourner vers le point
-    tello.rotate_clockwise(int(angle) % 360)
-    time.sleep(2)
+    # 1) Orientation
+    rotate_to_yaw(tello, target_yaw)
 
-    # Avancer (attention: max 500cm sur tello)
-    tello.move_forward(int(distance))
-    time.sleep(2)
+    # 2) Translation
+    move_forward_safe(tello, distance)
 
     return target_pos
 
 
-def maintain_altitude(tello, target=100, deadband=15):
+def maintain_altitude(tello, target=90, deadband=15):
     alt = tello.get_height()          # cm
     diff = target - alt
     if abs(diff) > deadband:
@@ -218,6 +246,9 @@ current_pos, ok = reposition_with_qr(tello)
 
 if ok:
     for i in range(1, len(parcours)):
+        print("🧍 Scan humain")
+        scan_for_human_yolov8(tello, verbose=True)
+
         target_pos = points[parcours[i] - 1]
 
         print(f"\nÉtape {i}: déplacement vers {target_pos}")
@@ -229,10 +260,8 @@ if ok:
             # mets à jour ta position estimée
             current_pos = list(pos)
 
-        print("🧍 Scan humain")
-        scan_for_human_yolov8(tello, verbose=True)
-
-        time.sleep(2)
+        maintain_altitude(tello)
+        time.sleep(1)
 
     print("Trajet terminé avec succès")
 else:
