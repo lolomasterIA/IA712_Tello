@@ -10,16 +10,19 @@ import numpy as np
 
 os.makedirs("debug", exist_ok=True)
 
-points = [(300, 200), (680, 390), (680, 560), (1150, 560), (205, 560)]
-parcours = [1, 2, 3, 4, 3, 5, 3, 2, 1]
+points = [(300, 200), (600, 390), (600, 560),
+          (1150, 560), (205, 560), (600, 240)]
+parcours = [1, 6, 2, 3, 4, 3, 5, 3, 2, 1]
 
 # Dictionnaire « QR-content ➜ position carte (cm) »
 QR_POS = {
     "asf":  (300,   0),   # amer_salon_frigo
     "asr":  (0,   125),   # amer_salon_radiateur
-    "asc":  (727, 450),   # amer_salon_couloir
+    "asc":  (700, 450),   # amer_salon_couloir
     "ac1l": (205, 848),   # amer_chambre1_lit
-    "ac2f": (1419, 764),  # amer_chambre2_fenetre
+    # "ac2f": (1419, 764),  # amer_chambre2_fenetre
+    # amer_chambre2_fenetre mais salon intermédiaire en fait
+    "ac2f": (700, 230),
     "act":  (680, 608),   # amer_couloir_toilette
 }
 
@@ -37,7 +40,8 @@ QR_POS = {                  # x, y en cm
     "asr": (0, 125),
     "asc": (727, 450),
     "ac1l": (205, 848),
-    "ac2f": (1419, 764),
+    # "ac2f": (1419, 764),
+    "ac2f": (727, 230),
     "act": (680, 608)
 }
 
@@ -48,6 +52,12 @@ objp = np.array([[0, 0, 0],
                  [0, QR_SIZE_CM, 0]], dtype=np.float32)
 
 qr = cv2.QRCodeDetector()
+
+
+def preprocess_contrast(img):
+    # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(img)
 
 
 def _pose_from_corners(corners):
@@ -66,8 +76,7 @@ def reposition_with_qr(tello, verbose=True):
 
     for step in range(12):
         frame = frame_read.frame
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frame = cv2.equalizeHist(frame)
+        frame = preprocess_contrast(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
         data, pts, _ = qr.detectAndDecode(frame)
         print(f"Raw data='{data}'  Pts={type(pts)}")
         ok_save = cv2.imwrite("debug/frame_raw"+str(step)+".jpg", frame)
@@ -163,54 +172,55 @@ def scan_for_human_yolov8(tello, verbose=True):
     return detected, detected_frame
 
 
-def rotate_to_yaw(tello, target_yaw_deg, tol=2):
-    """Tourne le drone vers target_yaw (0-360°) en choisissant le plus court chemin."""
-    current = tello.get_yaw() % 360           # ex. 323°
-    delta = (target_yaw_deg - current + 540) % 360 - 180   # dans [-180;180]
+def rotate_to_yaw(tello, target_yaw_deg, yaw_offset, tol=2):
+    """Tourne le drone vers target_yaw (référentiel monde XY), corrigé avec yaw_offset."""
+    current = tello.get_yaw() % 360
+    corrected_current = (current - yaw_offset + 360) % 360
+
+    delta = (target_yaw_deg - corrected_current + 540) % 360 - 180
+
+    print(
+        f"Yaw brut: {current:.1f}°, corrigé: {corrected_current:.1f}°, cible: {target_yaw_deg:.1f}°, delta: {delta:.1f}°")
 
     if abs(delta) < tol:
-        return                                # déjà aligné
+        return
 
     if delta > 0:
         tello.rotate_clockwise(int(round(delta)))
     else:
         tello.rotate_counter_clockwise(int(round(-delta)))
 
-    time.sleep(2)                             # stabilisation
+    time.sleep(2)
 
 
-def move_forward_safe(tello, dist_cm):
-    remaining = dist_cm
-    while remaining > 0:
-        step = min(500, remaining)
-        tello.move_forward(int(round(step)))
-        remaining -= step
-        time.sleep(2)
-
-
-def go_to_point(tello, current_pos, target_pos):
+def move_forward(tello, dist_cm):
     """
-    Déplace le drone du point courant vers target_pos.
-    - Calcule la direction (en XY monde) et tourne le drone
-      en tenant compte de son yaw réel.
-    - Avance ensuite par tranches de 500 cm.
+    Déplace le drone en ligne droite de dist_cm (doit être ≤ 500 cm).
     """
+    tello.move_forward(int(round(dist_cm)))
+    time.sleep(2)
+
+
+def go_to_point(tello, current_pos, target_pos, yaw_offset):
+    # Δ dans ton repère « plan d’étage »
     dx = target_pos[0] - current_pos[0]
     dy = target_pos[1] - current_pos[1]
 
-    distance = math.hypot(dx, dy)                # cm
-    target_yaw = (math.degrees(math.atan2(dy, dx))) % 360
+    distance = math.hypot(dx, dy)
 
-    # 1) Orientation
-    rotate_to_yaw(tello, target_yaw)
+    # ⚠️ inverser dy pour passer en repère math (y vers le haut)
+    target_yaw = math.degrees(math.atan2(-dy, dx)) % 360
 
-    # 2) Translation
-    move_forward_safe(tello, distance)
+    print(f"🔁 Aller de {current_pos} → {target_pos} | dx={dx:.1f}, dy={dy:.1f} "
+          f"| yaw cible={target_yaw:.1f}°")
+
+    rotate_to_yaw(tello, target_yaw, yaw_offset)
+    move_forward(tello, distance)
 
     return target_pos
 
 
-def maintain_altitude(tello, target=90, deadband=15):
+def maintain_altitude(tello, target=80, deadband=15):
     alt = tello.get_height()          # cm
     diff = target - alt
     if abs(diff) > deadband:
@@ -241,6 +251,9 @@ time.sleep(2)
 
 maintain_altitude(tello)
 
+yaw_ref = tello.get_yaw() % 360
+print(f"🔄 Référentiel initial : yaw de référence = {yaw_ref:.1f}°")
+
 ok = False
 current_pos, ok = reposition_with_qr(tello)
 
@@ -252,7 +265,7 @@ if ok:
         target_pos = points[parcours[i] - 1]
 
         print(f"\nÉtape {i}: déplacement vers {target_pos}")
-        current_pos = go_to_point(tello, current_pos, target_pos)
+        current_pos = go_to_point(tello, current_pos, target_pos, yaw_ref)
 
         print("Repositionnement à l'aide des amers")
         pos, ok = reposition_with_qr(tello)
